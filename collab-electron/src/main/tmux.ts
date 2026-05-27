@@ -13,7 +13,12 @@ export interface SessionMeta {
 export const SESSION_DIR = path.join(
   COLLAB_DIR, "terminal-sessions",
 );
-const SOCKET_NAME = "collab";
+const SOCKET_NAME = "default";
+
+// Remote host for tmux sessions — if set, tmux commands go via SSH
+// Set to empty string for local tmux (desktop), or "mav@100.86.55.27" for remote (laptop→desktop)
+const REMOTE_HOST = process.env.COLLAB_REMOTE_HOST || "";
+const REMOTE_PORT = process.env.COLLAB_SSH_PORT || "22";
 
 // Electron app module — unavailable in unit tests.
 // Lazy-loaded to avoid crashing bun test.
@@ -64,7 +69,28 @@ function tmuxEnv(): Record<string, string> | undefined {
   return { ...process.env, TERMINFO: dir } as Record<string, string>;
 }
 
+function remoteBaseArgs(): string[] {
+  // When remote, don't pass local tmux.conf path — it doesn't exist on remote
+  return ["-L", SOCKET_NAME, "-u"];
+}
+
+function shellEscape(arg: string): string {
+  // Wrap in double quotes if contains # or spaces (tmux format strings)
+  if (arg.includes("#") || arg.includes(" ") || arg.includes("{")) {
+    return `"${arg.replace(/"/g, '\\"')}"`;
+  }
+  return arg;
+}
+
 export function tmuxExec(...args: string[]): string {
+  if (REMOTE_HOST) {
+    const escapedArgs = args.map(shellEscape);
+    const tmuxCmd = ["tmux", ...remoteBaseArgs(), ...escapedArgs].join(" ");
+    return execFileSync(
+      "ssh", ["-p", REMOTE_PORT, "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no", REMOTE_HOST, tmuxCmd],
+      { encoding: "utf8", timeout: 8000 },
+    ).trim();
+  }
   return execFileSync(
     getTmuxBin(), [...baseArgs(), ...args],
     { encoding: "utf8", timeout: 5000, env: tmuxEnv() },
@@ -75,6 +101,19 @@ export function tmuxExecAsync(
   ...args: string[]
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    if (REMOTE_HOST) {
+      const escapedArgs = args.map(shellEscape);
+      const tmuxCmd = ["tmux", ...remoteBaseArgs(), ...escapedArgs].join(" ");
+      execFile(
+        "ssh", ["-p", REMOTE_PORT, "-o", "ConnectTimeout=3", "-o", "StrictHostKeyChecking=no", REMOTE_HOST, tmuxCmd],
+        { encoding: "utf8", timeout: 8000 },
+        (err, stdout) => {
+          if (err) return reject(err);
+          resolve(stdout.trim());
+        },
+      );
+      return;
+    }
     execFile(
       getTmuxBin(), [...baseArgs(), ...args],
       { encoding: "utf8", timeout: 5000, env: tmuxEnv() },
